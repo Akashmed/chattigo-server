@@ -317,6 +317,26 @@ async function run() {
       res.send(result);
     })
 
+    // find friends 
+    app.get('/friends/:id', async(req,res)=>{
+      const {id} = req.params;
+      const query = {
+        status: 'known',
+        $or:[
+          {senderId: id},
+          {recepientId: id}
+        ]
+      };
+      const results = await relationsCollection.find(query).toArray();
+
+      const otherUserIds = results.map(doc => 
+        doc.senderId === id ? new ObjectId(doc.recepientId) : new ObjectId(doc.senderId)
+      );
+
+      const friends = await usersCollection.find({_id: {$in: otherUserIds}}).toArray();
+      res.send(friends);
+    })
+
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
