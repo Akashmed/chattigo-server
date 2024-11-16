@@ -14,6 +14,7 @@ const corsOptions = {
 }
 app.use(cors(corsOptions));
 app.use(express.json());
+app.use(cookieParser());
 
 const http = require('http');
 const { Server } = require('socket.io');
@@ -28,20 +29,21 @@ const io = new Server(server, {
 
 
 const verifyToken = async (req, res, next) => {
-  const token = req.cookies?.token;
-  console.log(token);
+  const token = req.cookies?.token; // Correct way to access cookies
   if (!token) {
     return res.status(401).send({ message: 'unauthorized access' });
   }
-  jwt.verify('token', process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => { 
     if (err) {
       console.log(err);
       return res.status(401).send({ message: 'unauthorized access' });
     }
     req.user = decoded;
     next();
-  })
-}
+  });
+};
+
 
 
 
@@ -204,13 +206,13 @@ async function run() {
     });
 
     // get all users
-    app.get('/users', async (req, res) => {
+    app.get('/users', verifyToken, async (req, res) => {
       const result = await usersCollection.find().toArray();
       res.send(result);
     })
 
     // get all messages
-    app.get('/messages/:id/:rid', async (req, res) => {
+    app.get('/messages/:id/:rid', verifyToken, async (req, res) => {
       const { id, rid } = req.params;
       console.log(id, rid);
       const query = { senderId: id, recipientId: rid, delivered: false };
@@ -219,9 +221,9 @@ async function run() {
     })
 
     // get all received messages
-    app.get('/receivedMsg/:id', async (req, res) => {
+    app.get('/receivedMsg/:id',verifyToken, async (req, res) => {
       try {
-        const { id } = req.params; 
+        const { id } = req.params;
         const query = {
           $and: [
             { recipientId: id },
@@ -246,9 +248,9 @@ async function run() {
     });
 
     // get all user requests and count
-    app.get('/rqstsReceived/:id', async (req, res) => {
+    app.get('/rqstsReceived/:id',verifyToken, async (req, res) => {
       try {
-        const { id } = req.params; 
+        const { id } = req.params;
         const query = {
           $and: [
             { recepientId: id },
@@ -287,7 +289,7 @@ async function run() {
     })
 
     // get relation status
-    app.get('/relation/:myId/:rId', async (req, res) => {
+    app.get('/relation/:myId/:rId',verifyToken, async (req, res) => {
       const { myId, rId } = req.params;
       let query = { recepientId: rId, senderId: myId };
       let result = await relationsCollection.findOne(query);
@@ -318,23 +320,46 @@ async function run() {
     })
 
     // find friends 
-    app.get('/friends/:id', async(req,res)=>{
-      const {id} = req.params;
+    app.get('/friends/:id',verifyToken, async (req, res) => {
+      const { id } = req.params;
       const query = {
         status: 'known',
-        $or:[
-          {senderId: id},
-          {recepientId: id}
+        $or: [
+          { senderId: id },
+          { recepientId: id }
         ]
       };
       const results = await relationsCollection.find(query).toArray();
 
-      const otherUserIds = results.map(doc => 
+      const otherUserIds = results.map(doc =>
         doc.senderId === id ? new ObjectId(doc.recepientId) : new ObjectId(doc.senderId)
       );
 
-      const friends = await usersCollection.find({_id: {$in: otherUserIds}}).toArray();
+      const friends = await usersCollection.find({ _id: { $in: otherUserIds } }).toArray();
       res.send(friends);
+    })
+
+    // delete request and unfriend
+    app.delete('/dltRelations/:myId/:id', async (req, res) => {
+      const { myId, id } = req.params;
+      const query = {
+        $and: [
+          {
+            $or: [
+              { senderId: id },
+              { recepientId: id }
+            ]
+          },
+          {
+            $or: [
+              { senderId: myId },
+              { recepientId: myId }
+            ]
+          }
+        ]
+      };
+      const result = await relationsCollection.deleteOne(query);
+      res.send(result);
     })
 
 
