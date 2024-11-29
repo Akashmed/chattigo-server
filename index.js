@@ -135,10 +135,10 @@ async function run() {
           io.to(recipientSocketId).emit("receiveMessage", { senderId, text });
 
           // Update the message to mark it as delivered
-          await messagesCollection.updateOne(
-            { senderId, recipientId, text },
-            { $set: { delivered: true } }
-          );
+          // await messagesCollection.updateOne(
+          //   { senderId, recipientId, text },
+          //   { $set: { delivered: true } }
+          // );
         } else {
           // If recipient is offline, save the message to the database
           await saveMessages(senderId, recipientId, text);
@@ -206,7 +206,7 @@ async function run() {
     });
 
     // get all users
-    app.get('/users', verifyToken, async (req, res) => {
+    app.get('/users', async (req, res) => {
       const result = await usersCollection.find().toArray();
       res.send(result);
     })
