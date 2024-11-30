@@ -6,6 +6,12 @@ const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 require('dotenv').config();
 const port = process.env.PORT || 5000;
+const admin = require('firebase-admin');
+const serviceAccount = require(process.env.ADMIN_SDK);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
 
 const corsOptions = {
   origin: ['http://localhost:5173', 'http://localhost:5174'],
@@ -34,7 +40,7 @@ const verifyToken = async (req, res, next) => {
     return res.status(401).send({ message: 'unauthorized access' });
   }
 
-  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => { 
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
     if (err) {
       console.log(err);
       return res.status(401).send({ message: 'unauthorized access' });
@@ -75,8 +81,20 @@ async function run() {
       console.log('A user connected:', socket.id);
 
       socket.on("userConnected", async ({ userId, sId }) => {
-        userSocketMap.set(userId, socket.id); // Store user's socket ID
-        console.log("Attempting to fetch undelivered messages with userId:", userId, "and senderId:", sId);
+        userSocketMap.set(userId, {
+          socketId: socket.id,
+          activeChatRecipientId: sId // The user is chatting with this recipient
+        });
+        const reciepientOnline = userSocketMap.get(sId);
+        const senderOnline = userSocketMap.get(userId);
+
+        if (reciepientOnline && senderOnline) {
+          io.to(senderOnline.socketId).emit('userOnline', { userId });
+        };
+
+        if (reciepientOnline && senderOnline) {
+          io.to(reciepientOnline.socketId).emit('userOnline', { userId });
+        };
 
         try {
           // Check if userId and sId have correct values
@@ -94,9 +112,9 @@ async function run() {
 
           // Send each undelivered message to the recipient if available
           remainingMsgs.forEach((message) => {
-            const recipientSocketId = userSocketMap.get(message.recipientId);
-            if (recipientSocketId) {
-              io.to(recipientSocketId).emit('receiveMessage', {
+            const recipientData = userSocketMap.get(message.recipientId);
+            if (recipientData.socketId) {
+              io.to(recipientData.socketId).emit('receiveMessage', {
                 senderId: message.senderId,
                 text: message.text
               });
@@ -128,31 +146,33 @@ async function run() {
       };
 
       socket.on("sendMessage", async ({ senderId, recipientId, text }) => {
+        try {
+          const recipientData = userSocketMap.get(recipientId);
 
-        const recipientSocketId = await userSocketMap.get(recipientId);
-
-        if (recipientSocketId) {
-          io.to(recipientSocketId).emit("receiveMessage", { senderId, text });
-
-          // Update the message to mark it as delivered
-          // await messagesCollection.updateOne(
-          //   { senderId, recipientId, text },
-          //   { $set: { delivered: true } }
-          // );
-        } else {
-          // If recipient is offline, save the message to the database
-          await saveMessages(senderId, recipientId, text);
+          if (recipientData && recipientData.activeChatRecipientId === senderId) {
+            // Recipient is actively chatting
+            io.to(recipientData.socketId).emit("receiveMessage", { senderId, text });
+          } else {
+            // Recipient is not actively chatting
+            await saveMessages(senderId, recipientId, text);
+          }
+        } catch (error) {
+          console.error("Error handling sendMessage:", error);
         }
       });
 
 
       socket.on("disconnect", () => {
-        userSocketMap.forEach((value, key) => {
-          if (value === socket.id) {
-            userSocketMap.delete(key); // Remove user from map on disconnect
+        for (const [userId, data] of userSocketMap.entries()) {
+          if (data.socketId === socket.id) {
+            userSocketMap.delete(userId); // Remove the user entry
+            console.log(`User ${userId} disconnected.`);
+            io.emit("userOffline", { userId }); // Notify others
+            break;
           }
-        });
+        }
       });
+
     });
 
 
@@ -221,7 +241,7 @@ async function run() {
     })
 
     // get all received messages
-    app.get('/receivedMsg/:id',verifyToken, async (req, res) => {
+    app.get('/receivedMsg/:id', verifyToken, async (req, res) => {
       try {
         const { id } = req.params;
         const query = {
@@ -231,24 +251,42 @@ async function run() {
           ]
         };
 
-        const messages = await messagesCollection.find(query).toArray();
-        const userIds = messages.map(message => new ObjectId(message.senderId));
+        // Step 1: Aggregate messages to count them by senderId
+        const messageCounts = await messagesCollection.aggregate([
+          { $match: query }, // Filter the messages
+          {
+            $group: {
+              _id: "$senderId", // Group by senderId
+              messageCount: { $sum: 1 } // Count the messages
+            }
+          }
+        ]).toArray();
+
+        // Step 2: Extract senderIds from the aggregated result
+        const userIds = messageCounts.map(item => new ObjectId(item._id));
+
+        // Step 3: Fetch user information from the usersCollection
         const users = await usersCollection.find({ _id: { $in: userIds } }).toArray();
 
-        const response = {
-          messagesCount: messages.length,
-          users,
-        };
+        // Step 4: Combine user information with message counts
+        const response = users.map(user => {
+          const countInfo = messageCounts.find(count => count._id.toString() === user._id.toString());
+          return {
+            ...user,
+            messageCount: countInfo ? countInfo.messageCount : 0 // Add message count to the user object
+          };
+        });
 
+        // Send the response
         res.status(200).send(response);
-      } catch (err) {
-        console.error('An error occurred:', err);
-        res.status(500).send({ message: 'An error occurred while processing the request.' });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "An error occurred while fetching data." });
       }
     });
 
     // get all user requests and count
-    app.get('/rqstsReceived/:id',verifyToken, async (req, res) => {
+    app.get('/rqstsReceived/:id', verifyToken, async (req, res) => {
       try {
         const { id } = req.params;
         const query = {
@@ -289,7 +327,7 @@ async function run() {
     })
 
     // get relation status
-    app.get('/relation/:myId/:rId',verifyToken, async (req, res) => {
+    app.get('/relation/:myId/:rId', verifyToken, async (req, res) => {
       const { myId, rId } = req.params;
       let query = { recepientId: rId, senderId: myId };
       let result = await relationsCollection.findOne(query);
@@ -320,7 +358,7 @@ async function run() {
     })
 
     // find friends 
-    app.get('/friends/:id',verifyToken, async (req, res) => {
+    app.get('/friends/:id', verifyToken, async (req, res) => {
       const { id } = req.params;
       const query = {
         status: 'known',
@@ -361,6 +399,67 @@ async function run() {
       const result = await relationsCollection.deleteOne(query);
       res.send(result);
     })
+
+    // get search results
+    app.get('/search', async (req, res) => {
+      const { query } = req.query;
+      const results = await usersCollection.find({ name: { $regex: query, $options: 'i' } }).toArray();
+      res.send(results);
+    })
+
+    // update bio
+    app.patch('/bio/:id', async (req, res) => {
+      const { id } = req.params;
+      const { bio, name, photo } = req.body;
+
+      // Build the update object dynamically
+      const updatedFields = {};
+      if (name) updatedFields.name = name;
+      if (bio) updatedFields.bio = bio;
+      if (photo !== null && photo !== undefined) updatedFields.photo = photo;
+
+      const query = { _id: new ObjectId(id) };
+      const updatedInfo = { $set: updatedFields };
+
+      const result = await usersCollection.updateOne(query, updatedInfo);
+      res.send(result);
+
+    })
+
+    // delete user (Admin)
+    app.delete('/dltUser/:id', async (req, res) => {
+      const { id } = req.params;
+
+      try {
+        const query = { _id: new ObjectId(id) };
+        const user = await usersCollection.findOne(query);
+
+        if (!user) {
+          return res.status(404).send({ message: 'User not found in MongoDB' });
+        }
+
+        const userEmail = user.email;
+
+        // Firebase: Fetch the UID by email
+        const userRecord = await admin.auth().getUserByEmail(userEmail);
+        const uid = userRecord.uid;
+
+        // Firebase: Delete the user from Firebase Authentication
+        await admin.auth().deleteUser(uid);
+        console.log(`Successfully deleted user with UID: ${uid} and email: ${userEmail}`);
+
+        // MongoDB: Delete the user document
+        const deleteResult = await usersCollection.deleteOne(query);
+        if (deleteResult.deletedCount === 0) {
+          return res.status(500).send({ message: 'Failed to delete user from MongoDB' });
+        }
+
+        res.send({ message: 'User successfully deleted from Firebase and MongoDB' });
+      } catch (error) {
+        console.error('Error deleting user:', error);
+        res.status(500).send({ message: 'Failed to delete user', error });
+      }
+    });
 
 
     // Send a ping to confirm a successful connection
