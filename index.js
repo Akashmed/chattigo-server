@@ -7,7 +7,10 @@ const cookieParser = require('cookie-parser');
 require('dotenv').config();
 const port = process.env.PORT || 5000;
 const admin = require('firebase-admin');
-const serviceAccount = require(process.env.ADMIN_SDK);
+
+const serviceAccount = JSON.parse(
+  Buffer.from(process.env.ADMIN_SDK, 'base64').toString('utf-8')
+);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -19,7 +22,6 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps or curl)
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -86,7 +88,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const usersCollection = client.db('chatApp').collection('users');
     const messagesCollection = client.db('chatApp').collection('messages');
@@ -196,18 +198,23 @@ async function run() {
 
     // auth related api
     app.post('/jwt', async (req, res) => {
-      const user = req.body;
-      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
-        expiresIn: '365d',
-      })
-      res
-        .cookie('token', token, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict'
-        })
-        .send({ success: true })
-    })
+      try {
+        const user = req.body;
+        const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
+          expiresIn: '365d',
+        });
+        res
+          .cookie('token', token, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'strict'
+          })
+          .status(200)
+          .send({ success: true });
+      } catch (error) {
+        res.status(500).send({ success: false, message: 'Internal Server Error' });
+      }
+    });
 
     // logout
     app.get('/logout', async (req, res) => {
@@ -481,8 +488,8 @@ async function run() {
 
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    // await client.db("admin").command({ ping: 1 });
+    // console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
