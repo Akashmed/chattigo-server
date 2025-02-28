@@ -7,6 +7,7 @@ const cookieParser = require('cookie-parser');
 require('dotenv').config();
 const port = process.env.PORT || 5000;
 const admin = require('firebase-admin');
+const { encrypt, decrypt } = require('./encrypt');
 
 const serviceAccount = JSON.parse(
   Buffer.from(process.env.ADMIN_SDK, 'base64').toString('utf-8')
@@ -136,7 +137,7 @@ async function run() {
             if (recipientData.socketId) {
               io.to(recipientData.socketId).emit('receiveMessage', {
                 senderId: message.senderId,
-                text: message.text
+                text: decrypt(message.text)
               });
             }
           });
@@ -158,7 +159,7 @@ async function run() {
         const message = {
           senderId,
           recipientId,
-          text,
+          text: encrypt(text),
           time: new Date(),
           delivered: false,
         };
@@ -260,10 +261,21 @@ async function run() {
     app.get('/messages/:id/:rid', verifyToken, async (req, res) => {
       const { id, rid } = req.params;
       console.log(id, rid);
+
       const query = { senderId: id, recipientId: rid, delivered: false };
-      const result = await messagesCollection.find(query).toArray();
-      res.send(result);
-    })
+      const messages = await messagesCollection.find(query).toArray();
+
+      // Decrypt each message
+      const result = messages.map(msg => {
+        return {
+          ...msg,
+          text:decrypt(msg.text)
+        };
+      });
+
+      res.send(result); 
+    });
+
 
     // get all received messages
     app.get('/receivedMsg/:id', verifyToken, async (req, res) => {
